@@ -1,0 +1,80 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+
+# Test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+nosetests.xml
+coverage.xml
+*.cover
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+service-account*.json
+app/google-service-account.json
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite3
+*.rdb
+
+# Local tooling
+.idea/
+.vscode/
+*.code-workspace
+.spyproject/
+.ipynb_checkpoints/
+.DS_Store
+*.swp
+*.swo
+
+# Build artifacts
+build/
+docs/_build/
+target/
+
+# Project-specific generated data
+playground/*.png
+app/alembic/versions/*
+!app/alembic/versions/.gitkeep
+
+# OS and editor files
+Thumbs.db
