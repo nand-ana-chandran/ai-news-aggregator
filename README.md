@@ -142,6 +142,15 @@ The pipeline runs five stages: scrape sources, convert Anthropic pages to Markdo
 
 All credentials are read from environment variables. `.env` is listed in `.gitignore` and must never be committed. Keep these values private: `GEMINI_API_KEY`, `APP_PASSWORD`, `PROXY_PASSWORD`, `POSTGRES_PASSWORD`.
 
+ ## Example Output
+
+The pipeline generates a personalized AI news digest and delivers it through email.
+
+![Example daily digest email](docs/digest-example.png)
+
+
+![Example daily digest email2](docs/example.png)
+
 ## Scope and Future Work
 
 The project covers aggregation, enrichment, summarization, ranking, email delivery and PostgreSQL persistence. It does not use a vector database, embeddings or RAG.
