@@ -149,7 +149,7 @@ The pipeline generates a personalized AI news digest and delivers it through ema
 ![Example daily digest email](docs/digest-example.png)
 
 
-![Example daily digest email2](docs/example.png)
+![Example daily digest email2](docs/example2.png)
 
 ## Scope and Future Work
 
