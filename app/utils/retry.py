@@ -12,25 +12,19 @@ logger = logging.getLogger(__name__)
 
 _RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 _RETRYABLE_ERROR_NAMES = (
-    "timeout",
-    "timedout",
-    "connectionerror",
-    "connectionreset",
-    "temporarilyunavailable",
-    "serviceunavailable",
-    "internalservererror",
-    "resourceexhausted",
-    "ratelimit",
-    "toomanyrequests",
-    "servererror",
+    "timeout", "timedout", "connectionerror", "connectionreset",
+    "temporarilyunavailable", "serviceunavailable", "internalservererror",
+    "resourceexhausted", "ratelimit", "toomanyrequests", "servererror",
+    "requestfailed",
 )
 
 
 def is_retryable_error(error: BaseException) -> bool:
-    """Return True only when an error looks transient; unknown errors fail fast."""
+    """Classify common temporary network/API failures; unknown errors fail fast."""
     status_code = (
         getattr(error, "status_code", None)
         or getattr(error, "status", None)
+        or getattr(error, "code", None)
         or getattr(getattr(error, "response", None), "status_code", None)
     )
     try:
@@ -45,8 +39,6 @@ def is_retryable_error(error: BaseException) -> bool:
     module = type(error).__module__.lower()
     if any(token in name for token in _RETRYABLE_ERROR_NAMES):
         return True
-
-    # These standard/network client exceptions are transient in external calls.
     if isinstance(error, (TimeoutError, ConnectionError)):
         return True
     if any(client in module for client in ("requests", "urllib3", "httpx", "httpcore")):
@@ -67,8 +59,7 @@ def retry_call(
 ) -> T:
     """Call func with bounded exponential backoff and jitter.
 
-    max_attempts includes the initial call. Permanent/unknown errors are never retried.
-    Each operation logs its final status and attempt count.
+    max_attempts includes the initial call. Permanent/unknown errors are not retried.
     """
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
@@ -79,8 +70,7 @@ def retry_call(
         try:
             result = func()
         except Exception as error:
-            retryable = is_retryable_error(error)
-            if not retryable:
+            if not is_retryable_error(error):
                 logger.error(
                     "operation=%s status=permanent_failure attempts=%d error_type=%s",
                     operation, attempt, type(error).__name__,
@@ -102,10 +92,7 @@ def retry_call(
             )
             sleep(delay)
         else:
-            logger.info(
-                "operation=%s status=success attempts=%d",
-                operation, attempt,
-            )
+            logger.info("operation=%s status=success attempts=%d", operation, attempt)
             return result
 
     raise RuntimeError("Unreachable retry state")
