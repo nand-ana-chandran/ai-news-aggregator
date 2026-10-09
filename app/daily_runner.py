@@ -126,11 +126,12 @@ def run_daily_pipeline(hours: int = 24, top_n: int = 10) -> dict:
         results, "email", lambda: send_digest_email(hours=hours, top_n=top_n),
         {"success": False, "status": "failed", "error": "Email stage did not return a result"},
     )
+    email_stage_threw = results["stage_status"].get("email", {}).get("status") == "failed"
     results["email"] = email_result
     results["stage_status"]["email"] = {
         "status": "success" if email_result.get("success") else "failed",
     }
-    if not email_result.get("success") and results["stage_status"].get("email", {}).get("status") != "failed":
+    if not email_result.get("success") and not email_stage_threw:
         # A thrown exception is already captured by _run_stage. Only add this
         # error here when email delivery returned an unsuccessful result.
         results["errors"].append({
