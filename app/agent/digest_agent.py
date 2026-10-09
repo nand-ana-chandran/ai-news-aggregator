@@ -1,15 +1,21 @@
+import logging
 import os
 from typing import Optional
+
+from dotenv import load_dotenv
 from google import genai
 from pydantic import BaseModel
-from dotenv import load_dotenv
+
+from app.utils.retry import retry_call
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 
 class DigestOutput(BaseModel):
     title: str
     summary: str
+
 
 PROMPT = """You are an expert AI news analyst specializing in summarizing technical articles, research papers, and video content about artificial intelligence.
 
@@ -30,22 +36,27 @@ class DigestAgent:
         self.system_prompt = PROMPT
 
     def generate_digest(self, title: str, content: str, article_type: str) -> Optional[DigestOutput]:
+        user_prompt = f"Create a digest for this {article_type}: \n Title: {title} \n Content: {content[:8000]}"
+
         try:
-            user_prompt = f"Create a digest for this {article_type}: \n Title: {title} \n Content: {content[:8000]}"
-
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=f"{self.system_prompt}\n\n{user_prompt}",
-                config={
-                    "response_mime_type": "application/json",
-                    "response_schema": DigestOutput,
-                    "temperature": 0.7
-                }
+            response = retry_call(
+                "gemini.generate_digest",
+                lambda: self.client.models.generate_content(
+                    model=self.model,
+                    contents=f"{self.system_prompt}\n\n{user_prompt}",
+                    config={
+                        "response_mime_type": "application/json",
+                        "response_schema": DigestOutput,
+                        "temperature": 0.7,
+                    },
+                ),
             )
-
+            if response.parsed is None:
+                logger.error("operation=gemini.generate_digest status=invalid_response attempts=1")
+                return None
             return response.parsed
-        except Exception as e:
-            print(f"Error generating digest: {e}")
+        except Exception:
+            logger.exception("operation=gemini.generate_digest status=failed")
             return None
 
 
@@ -54,7 +65,6 @@ if __name__ == "__main__":
     result = agent.generate_digest(
         title="Test Article",
         content="This is a test article about artificial intelligence and machine learning advancements.",
-        article_type="article"
+        article_type="article",
     )
     print(result)
-

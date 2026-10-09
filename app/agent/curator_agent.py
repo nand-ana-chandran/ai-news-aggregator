@@ -1,10 +1,15 @@
+import logging
 import os
 from typing import List
+
+from dotenv import load_dotenv
 from google import genai
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
+
+from app.utils.retry import retry_call
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 
 class RankedArticle(BaseModel):
@@ -50,7 +55,7 @@ class CuratorAgent:
         interests = "\n".join(f"- {interest}" for interest in self.user_profile["interests"])
         preferences = self.user_profile["preferences"]
         pref_text = "\n".join(f"- {k}: {v}" for k, v in preferences.items())
-        
+
         return f"""{CURATOR_PROMPT}
 
 User Profile:
@@ -67,12 +72,11 @@ Preferences:
     def rank_digests(self, digests: List[dict]) -> List[RankedArticle]:
         if not digests:
             return []
-        
-        digest_list = "\n\n".join([
+
+        digest_list = "\n\n".join(
             f"ID: {d['id']}\nTitle: {d['title']}\nSummary: {d['summary']}\nType: {d['article_type']}"
             for d in digests
-        ])
-        
+        )
         user_prompt = f"""Rank these {len(digests)} AI news digests based on the user profile:
 
 {digest_list}
@@ -80,18 +84,23 @@ Preferences:
 Provide a relevance score (0.0-10.0) and rank (1-{len(digests)}) for each article, ordered from most to least relevant."""
 
         try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=f"{self.system_prompt}\n\n{user_prompt}",
-                config={
-                    "response_mime_type": "application/json",
-                    "response_schema": RankedDigestList,
-                    "temperature": 0.3
-                }
+            response = retry_call(
+                "gemini.rank_digests",
+                lambda: self.client.models.generate_content(
+                    model=self.model,
+                    contents=f"{self.system_prompt}\n\n{user_prompt}",
+                    config={
+                        "response_mime_type": "application/json",
+                        "response_schema": RankedDigestList,
+                        "temperature": 0.3,
+                    },
+                ),
             )
-            
             ranked_list = response.parsed
-            return ranked_list.articles if ranked_list else []
-        except Exception as e:
-            print(f"Error ranking digests: {e}")
+            if ranked_list is None:
+                logger.error("operation=gemini.rank_digests status=invalid_response attempts=1")
+                return []
+            return ranked_list.articles
+        except Exception:
+            logger.exception("operation=gemini.rank_digests status=failed")
             return []
