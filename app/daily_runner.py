@@ -29,11 +29,27 @@ def _run_stage(results: dict, stage: str, operation, fallback):
             "error_type": type(error).__name__,
             "error": str(error),
         }
-        results["errors"].append({"stage": stage, "error_type": type(error).__name__, "message": str(error)})
+        results["errors"].append({
+            "stage": stage, "error_type": type(error).__name__, "message": str(error),
+        })
         return fallback
 
     results["stage_status"][stage] = {"status": "success"}
     return value
+
+
+def _record_item_failures(results: dict, stage: str, value: dict, count_key: str = "failed") -> None:
+    failed_count = value.get(count_key, 0)
+    if failed_count:
+        results["stage_status"][stage] = {
+            "status": "partial_failure",
+            "failed_items": failed_count,
+        }
+        results["errors"].append({
+            "stage": stage,
+            "error_type": "ItemProcessingFailure",
+            "message": f"{failed_count} item(s) failed during {stage}",
+        })
 
 
 def run_daily_pipeline(hours: int = 24, top_n: int = 10) -> dict:
@@ -60,22 +76,20 @@ def run_daily_pipeline(hours: int = 24, top_n: int = 10) -> dict:
         source: len(scraping_results.get(source, []))
         for source in ("youtube", "openai", "anthropic")
     }
-    source_status = scraping_results.get("source_status", {})
-    for source, detail in source_status.items():
-        if detail.get("status") != "success":
-            results["errors"].extend(
-                {"stage": f"scraping.{source}.{item.get('stage', 'unknown')}",
-                 "error_type": item.get("error_type", "Unknown"),
-                 "message": item.get("message", "Source failed")}
-                for item in detail.get("errors", [])
-            )
-            results["stage_status"][f"scraping.{source}"] = {
-                "status": detail.get("status", "unknown"),
-                "fetched": detail.get("fetched", 0),
-                "persisted": detail.get("persisted", 0),
-                "error_count": len(detail.get("errors", [])),
-            }
-
+    for source, detail in scraping_results.get("source_status", {}).items():
+        source_status = detail.get("status", "unknown")
+        results["stage_status"][f"scraping.{source}"] = {
+            "status": source_status,
+            "fetched": detail.get("fetched", 0),
+            "persisted": detail.get("persisted", 0),
+            "error_count": len(detail.get("errors", [])),
+        }
+        for item in detail.get("errors", []):
+            results["errors"].append({
+                "stage": f"scraping.{source}.{item.get('stage', 'unknown')}",
+                "error_type": item.get("error_type", "Unknown"),
+                "message": item.get("message", "Source failed"),
+            })
     logger.info("Scraped counts: %s", results["scraping"])
 
     logger.info("[2/5] Processing Anthropic markdown...")
@@ -84,12 +98,7 @@ def run_daily_pipeline(hours: int = 24, top_n: int = 10) -> dict:
         {"total": 0, "processed": 0, "failed": 1},
     )
     results["processing"]["anthropic"] = anthropic_result
-    if anthropic_result.get("failed", 0):
-        results["errors"].append({
-            "stage": "anthropic_markdown",
-            "error_type": "ItemProcessingFailure",
-            "message": f"{anthropic_result['failed']} article(s) failed extraction",
-        })
+    _record_item_failures(results, "anthropic_markdown", anthropic_result)
 
     logger.info("[3/5] Processing YouTube transcripts...")
     youtube_result = _run_stage(
@@ -97,12 +106,7 @@ def run_daily_pipeline(hours: int = 24, top_n: int = 10) -> dict:
         {"total": 0, "processed": 0, "unavailable": 0, "failed": 1},
     )
     results["processing"]["youtube"] = youtube_result
-    if youtube_result.get("failed", 0):
-        results["errors"].append({
-            "stage": "youtube_transcripts",
-            "error_type": "ItemProcessingFailure",
-            "message": f"{youtube_result['failed']} transcript(s) failed retrieval",
-        })
+    _record_item_failures(results, "youtube_transcripts", youtube_result)
 
     logger.info("[4/5] Creating digests...")
     digest_result = _run_stage(
@@ -110,12 +114,7 @@ def run_daily_pipeline(hours: int = 24, top_n: int = 10) -> dict:
         {"total": 0, "processed": 0, "failed": 1},
     )
     results["digests"] = digest_result
-    if digest_result.get("failed", 0):
-        results["errors"].append({
-            "stage": "digests",
-            "error_type": "ItemProcessingFailure",
-            "message": f"{digest_result['failed']} digest(s) failed generation",
-        })
+    _record_item_failures(results, "digests", digest_result)
 
     logger.info("[5/5] Generating and sending email digest...")
     email_result = _run_stage(
@@ -123,6 +122,9 @@ def run_daily_pipeline(hours: int = 24, top_n: int = 10) -> dict:
         {"success": False, "status": "failed", "error": "Email stage did not return a result"},
     )
     results["email"] = email_result
+    results["stage_status"]["email"] = {
+        "status": "success" if email_result.get("success") else "failed",
+    }
     if not email_result.get("success"):
         results["errors"].append({
             "stage": "email",
@@ -152,9 +154,11 @@ def run_daily_pipeline(hours: int = 24, top_n: int = 10) -> dict:
     logger.info("Email: %s", email_result.get("status", "failed"))
     logger.info("Error count: %d", len(results["errors"]))
     for error in results["errors"]:
-        logger.error("stage=%s error_type=%s message=%s", error["stage"], error["error_type"], error["message"])
+        logger.error(
+            "stage=%s error_type=%s message=%s",
+            error["stage"], error["error_type"], error["message"],
+        )
     logger.info("=" * 60)
-
     return results
 
 
