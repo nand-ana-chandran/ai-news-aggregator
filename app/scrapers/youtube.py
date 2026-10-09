@@ -3,12 +3,12 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-import feedparser
 from pydantic import BaseModel
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 from youtube_transcript_api.proxies import WebshareProxyConfig
 
+from app.scrapers.rss import fetch_rss_feed
 from app.utils.retry import retry_call
 
 logger = logging.getLogger(__name__)
@@ -74,8 +74,6 @@ class YouTubeScraper:
             )
             return None
         except Exception:
-            # Transient failures propagate to the processor, which leaves the DB field
-            # NULL so a later pipeline run can retry. Do not cache a failure marker.
             logger.exception(
                 "operation=youtube.fetch_transcript status=failed video_id=%s",
                 video_id,
@@ -83,26 +81,36 @@ class YouTubeScraper:
             raise
 
     def get_latest_videos(self, channel_id: str, hours: int = 24) -> list[ChannelVideo]:
-        feed = feedparser.parse(self._get_rss_url(channel_id))
-        if not feed.entries:
-            logger.warning("operation=youtube.fetch_feed status=empty_feed channel_id=%s", channel_id)
-            return []
-
+        feed = fetch_rss_feed(
+            self._get_rss_url(channel_id),
+            operation="youtube.fetch_rss",
+        )
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
         videos = []
         for entry in feed.entries:
-            if "/shorts/" in entry.link:
+            if "/shorts/" in entry.get("link", ""):
                 continue
-            published_time = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+            published_parsed = getattr(entry, "published_parsed", None)
+            if not published_parsed:
+                logger.warning(
+                    "operation=youtube.parse_video status=missing_published_date url=%s",
+                    entry.get("link", ""),
+                )
+                continue
+            published_time = datetime(*published_parsed[:6], tzinfo=timezone.utc)
             if published_time >= cutoff_time:
-                video_id = self._extract_video_id(entry.link)
+                video_url = entry.get("link", "")
                 videos.append(ChannelVideo(
-                    title=entry.title,
-                    url=entry.link,
-                    video_id=video_id,
+                    title=entry.get("title", ""),
+                    url=video_url,
+                    video_id=self._extract_video_id(video_url),
                     published_at=published_time,
                     description=entry.get("summary", ""),
                 ))
+        logger.info(
+            "operation=youtube.get_latest_videos status=success channel_id=%s videos_found=%d",
+            channel_id, len(videos),
+        )
         return videos
 
     def scrape_channel(self, channel_id: str, hours: int = 150) -> list[ChannelVideo]:
