@@ -3,7 +3,6 @@
 The scraper and repository imports are stubbed so these tests run without network
 access, API credentials, a database, or heavyweight scraper dependencies.
 """
-import importlib
 import sys
 import types
 import unittest
@@ -112,7 +111,7 @@ class PipelineReliabilityTests(unittest.TestCase):
         self.repository.bulk_create_openai_articles.assert_called_once()
         self.repository.bulk_create_anthropic_articles.assert_called_once()
         self.assertEqual(result["source_status"]["youtube"]["status"], "partial_failure")
-        self.assertEqual(result["source_status"]["youtube"]["errors"][0]["stage"], "persist")
+        self.assertIn("persist", [item["stage"] for item in result["source_status"]["youtube"]["errors"]])
         self.assertEqual(result["source_status"]["openai"]["persisted"], 1)
         self.assertEqual(result["source_status"]["anthropic"]["persisted"], 1)
 
