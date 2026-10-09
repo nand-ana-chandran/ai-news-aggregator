@@ -19,8 +19,18 @@ def _record_error(status: dict, stage: str, error: Exception) -> None:
         "error_type": type(error).__name__,
         "message": str(error),
     })
-    status["status"] = "partial_failure" if status["fetched"] else "failed"
-    logger.exception("operation=scraping.%s status=failed stage=%s", stage, stage)
+    logger.exception("operation=scraping status=failed stage=%s", stage)
+
+
+def _rollback_repository(repo: Repository) -> None:
+    """Clear a failed SQLAlchemy transaction before attempting another source."""
+    session = getattr(repo, "session", None)
+    rollback = getattr(session, "rollback", None)
+    if callable(rollback):
+        try:
+            rollback()
+        except Exception:
+            logger.exception("operation=scraping.database_rollback status=failed")
 
 
 def run_scrapers(hours: int = 24) -> dict:
@@ -31,6 +41,7 @@ def run_scrapers(hours: int = 24) -> dict:
         "anthropic": _new_source_status(),
     }
     youtube_videos = []
+    youtube_records = []
     openai_articles = []
     anthropic_articles = []
 
@@ -43,6 +54,7 @@ def run_scrapers(hours: int = 24) -> dict:
         try:
             videos = youtube_scraper.get_latest_videos(channel_id, hours=hours)
             youtube_videos.extend(videos)
+            youtube_records.extend((channel_id, video) for video in videos)
             statuses["youtube"]["fetched"] += len(videos)
         except Exception as error:
             _record_error(statuses["youtube"], f"fetch_channel:{channel_id}", error)
@@ -59,29 +71,25 @@ def run_scrapers(hours: int = 24) -> dict:
     except Exception as error:
         _record_error(statuses["anthropic"], "fetch_rss", error)
 
-    # Persistence is isolated per source. A database error for one source should
-    # not prevent records from other sources from being saved.
-    if youtube_videos:
+    # Persistence is isolated per source. Roll back a failed transaction so a
+    # later source can still be saved using the same SQLAlchemy session.
+    if youtube_records:
         try:
-            video_dicts = [
+            statuses["youtube"]["persisted"] = repo.bulk_create_youtube_videos([
                 {
                     "video_id": video.video_id,
                     "title": video.title,
                     "url": video.url,
-                    "channel_id": next(
-                        (channel_id for channel_id in YOUTUBE_CHANNELS
-                         if f"channel_id={channel_id}" in video.url),
-                        "",
-                    ),
+                    "channel_id": channel_id,
                     "published_at": video.published_at,
                     "description": video.description,
                     "transcript": video.transcript,
                 }
-                for video in youtube_videos
-            ]
-            statuses["youtube"]["persisted"] = repo.bulk_create_youtube_videos(video_dicts)
+                for channel_id, video in youtube_records
+            ])
         except Exception as error:
             _record_error(statuses["youtube"], "persist", error)
+            _rollback_repository(repo)
 
     if openai_articles:
         try:
@@ -98,6 +106,7 @@ def run_scrapers(hours: int = 24) -> dict:
             ])
         except Exception as error:
             _record_error(statuses["openai"], "persist", error)
+            _rollback_repository(repo)
 
     if anthropic_articles:
         try:
@@ -114,8 +123,13 @@ def run_scrapers(hours: int = 24) -> dict:
             ])
         except Exception as error:
             _record_error(statuses["anthropic"], "persist", error)
+            _rollback_repository(repo)
 
     for source, status in statuses.items():
+        if status["errors"]:
+            status["status"] = "partial_failure" if status["fetched"] else "failed"
+        else:
+            status["status"] = "success"
         logger.info(
             "operation=scraping.%s status=%s fetched=%d persisted=%d error_count=%d",
             source, status["status"], status["fetched"], status["persisted"], len(status["errors"]),
