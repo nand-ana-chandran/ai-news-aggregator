@@ -12,10 +12,44 @@ from app.services.process_email import send_digest_email
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+def _run_stage(results: dict, stage: str, operation, fallback):
+    """Run a pipeline stage independently and retain failure details."""
+    try:
+        value = operation()
+    except Exception as error:
+        logger.exception("operation=pipeline.%s status=failed", stage)
+        results["stage_status"][stage] = {
+            "status": "failed",
+            "error_type": type(error).__name__,
+            "error": str(error),
+        }
+        results["errors"].append({
+            "stage": stage, "error_type": type(error).__name__, "message": str(error),
+        })
+        return fallback
+
+    results["stage_status"][stage] = {"status": "success"}
+    return value
+
+
+def _record_item_failures(results: dict, stage: str, value: dict, count_key: str = "failed") -> None:
+    failed_count = value.get(count_key, 0)
+    if failed_count:
+        results["stage_status"][stage] = {
+            "status": "partial_failure",
+            "failed_items": failed_count,
+        }
+        results["errors"].append({
+            "stage": stage,
+            "error_type": "ItemProcessingFailure",
+            "message": f"{failed_count} item(s) failed during {stage}",
+        })
 
 
 def run_daily_pipeline(hours: int = 24, top_n: int = 10) -> dict:
@@ -23,79 +57,111 @@ def run_daily_pipeline(hours: int = 24, top_n: int = 10) -> dict:
     logger.info("=" * 60)
     logger.info("Starting Daily AI News Aggregator Pipeline")
     logger.info("=" * 60)
-    
+
     results = {
         "start_time": start_time.isoformat(),
         "scraping": {},
         "processing": {},
         "digests": {},
         "email": {},
-        "success": False
+        "stage_status": {},
+        "errors": [],
+        "success": False,
+        "status": "failed",
     }
-    
-    try:
-        logger.info("\n[1/5] Scraping articles from sources...")
-        scraping_results = run_scrapers(hours=hours)
-        results["scraping"] = {
-            "youtube": len(scraping_results.get("youtube", [])),
-            "openai": len(scraping_results.get("openai", [])),
-            "anthropic": len(scraping_results.get("anthropic", []))
+
+    logger.info("[1/5] Scraping articles from sources...")
+    scraping_results = _run_stage(results, "scraping", lambda: run_scrapers(hours=hours), {})
+    results["scraping"] = {
+        source: len(scraping_results.get(source, []))
+        for source in ("youtube", "openai", "anthropic")
+    }
+    for source, detail in scraping_results.get("source_status", {}).items():
+        source_status = detail.get("status", "unknown")
+        results["stage_status"][f"scraping.{source}"] = {
+            "status": source_status,
+            "fetched": detail.get("fetched", 0),
+            "persisted": detail.get("persisted", 0),
+            "error_count": len(detail.get("errors", [])),
         }
-        logger.info(f"✓ Scraped {results['scraping']['youtube']} YouTube videos, "
-                    f"{results['scraping']['openai']} OpenAI articles, "
-                    f"{results['scraping']['anthropic']} Anthropic articles")
-        
-        logger.info("\n[2/5] Processing Anthropic markdown...")
-        anthropic_result = process_anthropic_markdown()
-        results["processing"]["anthropic"] = anthropic_result
-        logger.info(f"✓ Processed {anthropic_result['processed']} Anthropic articles "
-                    f"({anthropic_result['failed']} failed)")
-        
-        logger.info("\n[3/5] Processing YouTube transcripts...")
-        youtube_result = process_youtube_transcripts()
-        results["processing"]["youtube"] = youtube_result
-        logger.info(f"✓ Processed {youtube_result['processed']} transcripts "
-                    f"({youtube_result['unavailable']} unavailable)")
-        
-        logger.info("\n[4/5] Creating digests for articles...")
-        digest_result = process_digests()
-        results["digests"] = digest_result
-        logger.info(f"✓ Created {digest_result['processed']} digests "
-                    f"({digest_result['failed']} failed out of {digest_result['total']} total)")
-        
-        logger.info("\n[5/5] Generating and sending email digest...")
-        email_result = send_digest_email(hours=hours, top_n=top_n)
-        results["email"] = email_result
-        
-        if email_result["success"]:
-            logger.info(f"✓ Email sent successfully with {email_result['articles_count']} articles")
-            results["success"] = True
-        else:
-            logger.error(f"✗ Failed to send email: {email_result.get('error', 'Unknown error')}")
-        
-    except Exception as e:
-        logger.error(f"Pipeline failed with error: {e}", exc_info=True)
-        results["error"] = str(e)
-    
+        for item in detail.get("errors", []):
+            results["errors"].append({
+                "stage": f"scraping.{source}.{item.get('stage', 'unknown')}",
+                "error_type": item.get("error_type", "Unknown"),
+                "message": item.get("message", "Source failed"),
+            })
+    logger.info("Scraped counts: %s", results["scraping"])
+
+    logger.info("[2/5] Processing Anthropic markdown...")
+    anthropic_result = _run_stage(
+        results, "anthropic_markdown", process_anthropic_markdown,
+        {"total": 0, "processed": 0, "failed": 1},
+    )
+    results["processing"]["anthropic"] = anthropic_result
+    _record_item_failures(results, "anthropic_markdown", anthropic_result)
+
+    logger.info("[3/5] Processing YouTube transcripts...")
+    youtube_result = _run_stage(
+        results, "youtube_transcripts", process_youtube_transcripts,
+        {"total": 0, "processed": 0, "unavailable": 0, "failed": 1},
+    )
+    results["processing"]["youtube"] = youtube_result
+    _record_item_failures(results, "youtube_transcripts", youtube_result)
+
+    logger.info("[4/5] Creating digests...")
+    digest_result = _run_stage(
+        results, "digests", process_digests,
+        {"total": 0, "processed": 0, "failed": 1},
+    )
+    results["digests"] = digest_result
+    _record_item_failures(results, "digests", digest_result)
+
+    logger.info("[5/5] Generating and sending email digest...")
+    email_result = _run_stage(
+        results, "email", lambda: send_digest_email(hours=hours, top_n=top_n),
+        {"success": False, "status": "failed", "error": "Email stage did not return a result"},
+    )
+    results["email"] = email_result
+    results["stage_status"]["email"] = {
+        "status": "success" if email_result.get("success") else "failed",
+    }
+    if not email_result.get("success"):
+        results["errors"].append({
+            "stage": "email",
+            "error_type": email_result.get("error_type", "EmailDeliveryFailure"),
+            "message": email_result.get("error", "Email delivery failed"),
+        })
+
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds()
     results["end_time"] = end_time.isoformat()
     results["duration_seconds"] = duration
-    
-    logger.info("\n" + "=" * 60)
+    results["success"] = bool(email_result.get("success")) and not results["errors"]
+    results["status"] = (
+        "success" if results["success"]
+        else "partial_success" if email_result.get("success")
+        else "failed"
+    )
+
+    logger.info("=" * 60)
     logger.info("Pipeline Summary")
     logger.info("=" * 60)
-    logger.info(f"Duration: {duration:.1f} seconds")
-    logger.info(f"Scraped: {results['scraping']}")
-    logger.info(f"Processed: {results['processing']}")
-    logger.info(f"Digests: {results['digests']}")
-    logger.info(f"Email: {'Sent' if results['success'] else 'Failed'}")
+    logger.info("Status: %s", results["status"])
+    logger.info("Duration: %.1f seconds", duration)
+    logger.info("Scraped: %s", results["scraping"])
+    logger.info("Processing: %s", results["processing"])
+    logger.info("Digests: %s", results["digests"])
+    logger.info("Email: %s", email_result.get("status", "failed"))
+    logger.info("Error count: %d", len(results["errors"]))
+    for error in results["errors"]:
+        logger.error(
+            "stage=%s error_type=%s message=%s",
+            error["stage"], error["error_type"], error["message"],
+        )
     logger.info("=" * 60)
-    
     return results
 
 
 if __name__ == "__main__":
     result = run_daily_pipeline(hours=24, top_n=10)
-    exit(0 if result["success"] else 1)
-
+    raise SystemExit(0 if result["success"] else 1)

@@ -2,10 +2,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-import feedparser
-from docling.document_converter import DocumentConverter
 from pydantic import BaseModel
+from docling.document_converter import DocumentConverter
 
+from app.scrapers.rss import fetch_rss_feed
 from app.utils.retry import retry_call
 
 logger = logging.getLogger(__name__)
@@ -34,11 +34,17 @@ class AnthropicScraper:
         cutoff_time = now - timedelta(hours=hours)
         articles = []
         seen_guids = set()
+        source_failures = []
 
         for rss_url in self.rss_urls:
-            feed = feedparser.parse(rss_url)
-            if not feed.entries:
-                logger.warning("operation=anthropic.fetch_feed status=empty_feed source=%s", rss_url)
+            try:
+                feed = fetch_rss_feed(rss_url, operation="anthropic.fetch_rss")
+            except Exception as error:
+                source_failures.append((rss_url, error))
+                logger.exception(
+                    "operation=anthropic.fetch_rss status=source_failed source=%s",
+                    rss_url,
+                )
                 continue
 
             for entry in feed.entries:
@@ -58,6 +64,21 @@ class AnthropicScraper:
                             published_at=published_time,
                             category=entry.get("tags", [{}])[0].get("term") if entry.get("tags") else None,
                         ))
+
+        if source_failures and not articles:
+            raise RuntimeError(
+                f"All Anthropic RSS sources failed ({len(source_failures)}/{len(self.rss_urls)})."
+            ) from source_failures[0][1]
+        if source_failures:
+            logger.warning(
+                "operation=anthropic.get_articles status=partial_success articles_found=%d failed_feeds=%d",
+                len(articles), len(source_failures),
+            )
+        else:
+            logger.info(
+                "operation=anthropic.get_articles status=success articles_found=%d",
+                len(articles),
+            )
         return articles
 
     def url_to_markdown(self, url: str) -> Optional[str]:
@@ -72,8 +93,6 @@ class AnthropicScraper:
                 return None
             return markdown
         except Exception:
-            # Return None without persisting a failure marker. The database record
-            # stays eligible for extraction on the next pipeline run.
             logger.exception("operation=anthropic.extract_article status=failed_retryable url=%s", url)
             return None
 
